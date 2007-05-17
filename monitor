@@ -1,0 +1,12 @@
+#!/bin/bash
+dirname=$(dirname "$0")
+flagfile="$dirname/relaunch"
+
+touch "$flagfile"
+while [ -e "$dirname/relaunch" ]; do
+   rm -f "$flagfile"
+   "$dirname/polebot" --verbosity DEBUG -n polebot -p asfodelo
+   sleep 2
+done
+
+echo "monitor exiting"

@@ -1,0 +1,670 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Carp;
+use Pod::Usage qw( pod2usage );
+use Getopt::Long qw( :config gnu_getopt );
+use version; my $VERSION = qv('0.0.1');
+use English qw( -no_match_vars );
+use Log::Log4perl qw( :easy );
+use File::Basename qw( basename );
+
+my %config = (
+   nick       => basename($0),
+   password   => '',
+   server     => 'irc.freenode.net',
+   ping_delay => 30,
+   channel    => ['#polebot'],
+   port       => 6667,
+   username   => 'PolettiX bot',
+   ircname    => 'PoCo::IRC PolettiX bot',
+   verbosity  => 'INFO',
+);
+GetOptions(
+   \%config,            'usage',
+   'help',              'man',
+   'version',           'nick|n=s',
+   'password|pass|p=s', 'server|s=s',
+   'channel|c=s@',      'ping_delay|ping-delay|D=i',
+   'port|P=i',          'username|u=s',
+   'ircname|I=s',       'verbosity|v=s',
+);
+pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => '')
+  if $config{version};
+pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
+pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
+  if $config{help};
+pod2usage(-verbose => 2) if $config{man};
+
+for my $channel (@{$config{channel}}) {
+   $channel = '#' . $channel unless substr($channel, 0, 1) eq '#';
+}
+
+my %level_for = (
+   DEBUG => $DEBUG,
+   INFO  => $INFO,
+   WARN  => $WARN,
+   ERROR => $ERROR,
+   FATAL => $FATAL,
+);
+Log::Log4perl->easy_init($level_for{$config{verbosity}} || $INFO);
+
+my $bot = Polebot->new(\%config);
+$bot->run();
+exit 0;
+
+package Polebot;
+use strict;
+use warnings;
+use Carp;
+use English qw( -no_match_vars );
+
+# Integrated logging facility
+use Log::Log4perl qw( :easy );
+use Time::HiRes ();
+use Symbol      ();
+
+use POE;
+use POE::Component::IRC::State;
+use POE::Component::IRC::Plugin::CTCP;
+
+use File::Basename qw( basename dirname );
+use File::Spec::Functions qw( catdir catfile );
+
+sub new {
+   my $package = shift;
+   my ($conf) = @_;
+
+   my $self = bless {%$conf}, $package;
+
+   $self->{irc} = POE::Component::IRC::State->spawn(
+      alias => 'irc',
+
+      nick     => $config{nick},
+      server   => $config{server},
+      username => $config{username},
+      ircname  => $config{ircname},
+      port     => $config{port},
+   );
+
+   $self->{session} = POE::Session->create(
+      object_states => [
+         $self => [
+            qw(
+              _start _tick _default hey_you
+              irc_001 irc_pong irc_ctcp_ping
+              irc_public irc_msg
+              )    #irc_msg irc_notice
+         ],
+      ],
+   );
+
+   $self->{kernel} = $poe_kernel;
+   $self->{logger} = Log::Log4perl::get_logger();
+
+   $self->load_plugins();
+
+   return $self;
+} ## end sub new
+
+# Create the bot session.  The new() call specifies the events the bot
+# knows about and the functions that will handle those events.
+
+# Run the bot until it is done.
+sub run       { shift->{kernel}->run() }
+sub kernel    { return shift->{kernel} }
+sub logger    { return shift->{logger} }
+sub irc       { return shift->{irc} }
+sub connector { return shift->{connector} }
+
+
+sub authenticated {
+   my $self = shift;
+   return keys %{$self->{authenticated} ||= {}};
+}
+
+sub is_authenticated {
+   my ($self, $nick) = @_;
+   return exists $self->{authenticated}{$nick};
+}
+
+sub login {
+   my ($self, $nick) = @_;
+   $self->{authenticated}{$nick} = 1;
+}
+
+sub logout {
+   my ($self, $nick) = @_;
+   delete $self->{authenticated}{$nick};
+}
+
+# The bot session has started.  Register this bot with the "magnet"
+# IRC component.  Select a nickname.  Connect to a server.
+sub post_irc {
+   my $self = shift;
+   return $self->{irc}->yield(@_);
+}
+
+sub _start {
+   my ($kernel, $self) = @_[KERNEL, OBJECT];
+
+   # Ensure our TCP connection won't go asleep
+   #   $kernel->yield('_tick');
+
+   # Register for all events, then connect
+   $self->post_irc(register  => 'all');
+   $self->post_irc('connect' => {});
+
+   $self->{connector} =
+     POE::Component::IRC::Plugin::Connector::Custom->new(delay => 30);
+   $self->{irc}->plugin_add(Connector => $self->{connector});
+   $self->post_irc(
+      'connect' => {
+         nick   => $self->{nick},
+         server => $self->{server},
+      }
+   );
+} ## end sub _start
+
+sub plugin_dir {
+   catdir(dirname($0), 'plugin');
+}
+
+sub unload_plugins {
+   my $self = shift;
+
+   my @packages;
+   for my $plugin (@{$self->{plugins} || []}) {
+      DEBUG "unloading ", $plugin->name();
+      delete $INC{$plugin->filename()};
+      push @packages, ref $plugin;
+   }
+   $self->{plugins} = [];
+   Symbol::delete_package($_) for @packages;
+
+   my $dirname  = $self->plugin_dir();
+   my @remained =
+     grep { /\A $dirname .* /mxs && !/_Base\.pm \z/mxs } keys %INC;
+   delete @INC{@remained};
+
+   return;
+} ## end sub unload_plugins
+
+sub load_plugin {
+   my $self = shift;
+   my ($file) = @_;
+   (my $bare = basename($file)) =~ s/\.pm$//;
+   my $module = 'Polebot::Plugin::' . $bare;
+   eval {
+      DEBUG "requiring '$file'...";
+      require $file;
+      DEBUG "building up a new object...";
+      my $plugin = $module->new($self, $file);
+      DEBUG "pushing into plugins array...";
+      push @{$self->{plugins}}, $plugin;
+
+      DEBUG "getting name and description for plugin...";
+      my $name        = $plugin->name();
+      my $description = $plugin->description();
+      INFO "loaded plugin $name: '$description'";
+   };
+   WARN "failed to load '$bare': $EVAL_ERROR" if length $EVAL_ERROR;
+   return;
+} ## end sub load_plugin
+
+sub load_plugins {
+   my $self = shift;
+
+   my $dirname = $self->plugin_dir();
+   INFO "getting plugins from '$dirname'";
+   if (!-d $dirname) {
+      WARN "no plugin directory '$dirname'";
+      return;
+   }
+
+   DEBUG "unloading previous plugins, if any...";
+   $self->unload_plugins($dirname);
+
+   my @plugins;
+   $self->{plugins} = \@plugins;
+
+   DEBUG "loading plugins...";
+   my $plugin_base_class = catfile($dirname, '_Base.pm');
+   require $plugin_base_class;
+
+   if (opendir my $dh, $dirname) {
+      DEBUG "opendir(): '$dirname' correct";
+    PLUGIN:
+      for my $file (sort readdir $dh) {
+         DEBUG "readdir(): got file '$file'";
+         next unless $file =~ /\A [^._].*\.pm \z/mxs;
+         $self->load_plugin(catfile($dirname, $file));
+      }
+
+      closedir $dh;
+   } ## end if (opendir my $dh, $dirname)
+   else {
+      WARN "could not opendir('$dirname'): $OS_ERROR";
+      return;
+   }
+
+   return;
+} ## end sub load_plugins
+
+sub _tick {
+   my ($kernel, $self) = @_[KERNEL, OBJECT];
+   $kernel->delay(_tick => $config{ping_delay});
+   $self->{last_ping} = Time::HiRes::time();
+   $self->post_irc(ping => ('LAG' . time()));
+} ## end sub _tick
+
+sub _default {
+   my ($event, $args) = @_[ARG0 .. $#_];
+   my @output = ("$event: ");
+
+   foreach my $arg (@$args) {
+      if (ref($arg) eq 'ARRAY') {
+         push(@output, "[" . join(" ,", @$arg) . "]");
+      }
+      else {
+         push(@output, defined $arg ? "'$arg'" : '<undef>');
+      }
+   } ## end foreach my $arg (@$args)
+   INFO join ' ', @output;
+   return 0;
+} ## end sub _default
+
+sub hey_you {
+   my ($kernel, $self, $coderef) = @_[KERNEL, OBJECT, ARG0];
+   eval { $coderef->() };
+   return;
+}
+
+sub call_me {
+   my $self = shift;
+   my ($coderef, $delay) = @_;
+   my $kernel = $self->kernel();
+   $kernel->delay_set(hey_you => $delay, $coderef);
+   return;
+} ## end sub call_me
+
+sub say {
+   my $self   = shift;
+   my $dest   = shift;
+   my $kernel = $self->{kernel};
+   for (map { split /\n+/ } @_) {
+      my $line = defined($_) ? $_ : '';
+      $self->post_irc(privmsg => $dest => $line);
+   }
+} ## end sub say
+
+sub say_now {
+   my $self   = shift;
+   my $dest   = shift;
+   my $kernel = $self->{kernel};
+   my $irc_id = $self->irc()->session_id();
+
+   for (map { split /\n+/ } @_) {
+      my $line = defined($_) ? $_ : '';
+      $kernel->call($irc_id, privmsg => $dest => $line);
+   }
+} ## end sub say_now
+
+sub defer_actions {
+   my $self = shift;
+   push @{$self->{deferred_actions} ||= []}, @_;
+   return;
+}
+
+sub execute_deferred_actions {
+   my $self = shift;
+   for my $action (@{$self->{deferred_actions} || []}) {
+      eval { $action->() };
+      ERROR "deferred action error: $EVAL_ERROR" if length $EVAL_ERROR;
+   }
+   $self->{deferred_actions} = [];
+
+   return;
+} ## end sub execute_deferred_actions
+
+sub register_quit {
+   my $self = shift;
+   $self->{please_quit} = 1;
+}
+
+sub quit {
+   my $self = shift;
+   DEBUG "quitting...";
+   $self->unload_plugins();
+   exit 0;
+} ## end sub quit
+
+# ----------------------------------------------------------------------
+
+# The bot has successfully connected to a server.  Join a channel.
+sub irc_001 {
+   my $self = shift;
+   INFO "connected";
+   $self->say('NickServ', 'identify ' . $self->{password});
+   $self->post_irc('join' => $_) for @{$self->{channel}};
+} ## end sub irc_001
+
+# The bot has received a public message.  Parse it for commands, and
+# respond to interesting things.
+sub fire_plugins {
+   my $self = shift;
+   my ($what, $who, $where, $msg, $is_op) = @_;
+
+   my ($speaker) = split /!/, $who;
+   my $is_adm = $self->is_authenticated($speaker);
+
+   for my $plugin (@{$self->{plugins} || []}) {
+      DEBUG "trying '", $plugin->name(), "'...";
+
+      next if $plugin->only_from_operator() && ! ($is_op || $is_adm);
+      next if $plugin->only_from_admin() && ! $is_adm;
+      my $method = $plugin->can($what) or next;
+      eval {
+         INFO("executed plugin '", $plugin->name(), "'")
+           if $plugin->$method($who, $where, $msg);
+      };
+      ERROR $EVAL_ERROR if $EVAL_ERROR;
+   } ## end for my $plugin (@{$self...
+
+   $self->execute_deferred_actions();
+   $self->quit() if $self->{please_quit};
+
+   return;
+} ## end sub fire_plugins
+
+sub irc_public {
+   my ($kernel, $self, $heap, $who, $where, $msg) =
+     @_[KERNEL, OBJECT, HEAP, ARG0, ARG1, ARG2];
+
+   my ($speaker) = split /!/, $who;
+   my $channel             = $where->[0];
+   my $speaker_is_operator =
+     $self->irc()->is_channel_operator($channel, $speaker);
+
+   my $ts = scalar localtime;
+   INFO "<$speaker:$channel> $msg\n";
+
+   $self->fire_plugins('public', $who, $where, $msg, $speaker_is_operator);
+
+   return;
+} ## end sub irc_public
+
+sub irc_msg {
+   my ($kernel, $self, $heap, $who, $where, $msg) =
+     @_[KERNEL, OBJECT, HEAP, ARG0, ARG1, ARG2];
+
+   my ($speaker) = split /!/, $who;
+
+   my $ts = scalar localtime;
+   INFO "MSG <$speaker> $msg\n";
+
+   $self->fire_plugins('msg', $who, $where, $msg, 0);
+
+   return;
+} ## end sub irc_msg
+
+#sub irc_msg {
+#   my $self = shift;
+#   return $self->got_something(@_, 'msg');
+#}
+#
+#sub irc_notice {
+#   my $self = shift;
+#   return $self->got_something(@_, 'notice');
+#}
+
+sub irc_pong { DEBUG 'pong...' }
+
+sub irc_ctcp_ping {
+   my $self = $_[OBJECT];
+}
+
+package POE::Component::IRC::Plugin::Connector::Custom;
+
+use POE;
+use base 'POE::Component::IRC::Plugin::Connector';
+use POE::Component::IRC::Plugin ':ALL';
+use Time::HiRes;
+use Log::Log4perl qw( :easy );
+
+sub _auto_ping {
+   my ($kernel, $self) = @_[KERNEL, OBJECT];
+   my $time = Time::HiRes::time();
+   $self->{irc}->yield('ping' => $time);
+   @{$self->{pings}} = $time;    # no push...
+   $self->{seen_traffic} = 0;
+   $kernel->delay(_auto_ping => $self->{delay} || 300);
+   undef;
+} ## end sub _auto_ping
+
+sub S_pong {
+   my ($self, $irc) = splice @_, 0, 2;
+   my $ping = shift @{$self->{pings}};
+   return PCI_EAT_NONE unless $ping;
+   $self->{lag}          = Time::HiRes::time() - $ping;
+   $self->{seen_traffic} = 1;
+   return PCI_EAT_NONE;
+} ## end sub S_pong
+
+1;
+
+__END__
+
+=head1 NAME
+
+polebot - yet another IRC bot, this time from PolettiX
+
+
+=head1 VERSION
+
+See version at beginning of script, variable $VERSION, or call
+
+   shell$ polebot --version
+
+
+=head1 USAGE
+
+   polebot [--usage] [--help] [--man] [--version]
+
+  
+=head1 EXAMPLES
+
+   shell$ polebot
+
+   # Set nick, defaults to script name
+   shell$ polebot --nick 'gung-ho'
+
+   # Set network to connect, defaults to irc.freenode.net
+   shell$ polebot --server irc.example.com
+
+   # Set channels to connect to, default to #polebot. You can omit
+   # the pound char, i.e. we will connect to #example and #example2
+   # here
+   shell$ polebot --channel example --channel '#example2'
+
+  
+=head1 DESCRIPTION
+
+=for l'autore, da riempire:
+   Fornite una descrizione completa del modulo e delle sue caratteristiche.
+   Aiutatevi a strutturare il testo con le sottosezioni (=head2, =head3)
+   se necessario.
+
+
+=head1 OPTIONS
+
+=for l'autore, da riempire:
+   Una descrizione di tutte le opzioni possibili nella chiamata allo script
+
+=over
+
+=item --help
+
+print a somewhat more verbose help, showing usage, this description of
+the options and some examples from the synopsis.
+
+=item --man
+
+print out the full documentation for the script.
+
+=item --usage
+
+print a concise usage line and exit.
+
+=item --version
+
+print the version of the script.
+
+=back
+
+=head1 DIAGNOSTICS
+
+=for l'autore, da riempire:
+   Elencate qualunque singolo errore o messaggio di avvertimento che
+   lo script può generare, anche quelli che non "accadranno mai".
+   Includete anche una spiegazione completa di ciascuno di questi
+   problemi, una o più possibili cause e qualunque rimedio
+   suggerito.
+
+
+=over
+
+=item C<< Error message here, perhaps with %s placeholders >>
+
+[Descrizione di un errore]
+
+=item C<< Another error message here >>
+
+[Descrizione di un errore]
+
+[E così via...]
+
+=back
+
+
+=head1 CONFIGURATION AND ENVIRONMENT
+
+=for l'autore, da riempire:
+   Una spiegazione completa di qualunque sistema di configurazione
+   utilizzato dallo script, inclusi i nomi e le posizioni dei file di
+   configurazione, il significato di ciascuna variabile di ambiente
+   utilizzata e proprietà che può essere impostata. Queste descrizioni
+   devono anche includere dettagli su eventuali linguaggi di configurazione
+   utilizzati.
+  
+polebot requires no configuration files or environment variables.
+
+
+=head1 DEPENDENCIES
+
+=for l'autore, da riempire:
+   Una lista di tutti i moduli su cui si basa questo script,
+   incluse eventuali restrizioni sulle relative versioni, ed una
+   indicazione se il modulo in questione è parte della distribuzione
+   standard di Perl, parte della distribuzione del modulo o se
+   deve essere installato separatamente.
+
+None.
+
+
+=head1 BUGS AND LIMITATIONS
+
+=for l'autore, da riempire:
+   Una lista di tutti i problemi conosciuti relativi al modulo,
+   insime a qualche indicazione sul fatto che tali problemi siano
+   plausibilmente risolti in una versione successiva. Includete anche
+   una lista delle restrizioni sulle funzionalità fornite dal
+   modulo: tipi di dati che non si è in grado di gestire, problematiche
+   relative all'efficienza e le circostanze nelle quali queste possono
+   sorgere, limitazioni pratiche sugli insiemi dei dati, casi
+   particolari che non sono (ancora) gestiti, e così via.
+
+No bugs have been reported.
+
+Please report any bugs or feature requests through http://rt.cpan.org/
+
+
+=head1 AUTHOR
+
+Flavio Poletti C<flavio@polettix.it>
+
+
+=head1 LICENCE AND COPYRIGHT
+
+Copyright (c) 2006, Flavio Poletti C<flavio@polettix.it>. All rights reserved.
+
+This script is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself. See L<perlartistic>
+and L<perlgpl>.
+
+Questo script è software libero: potete ridistribuirlo e/o
+modificarlo negli stessi termini di Perl stesso. Vedete anche
+L<perlartistic> e L<perlgpl>.
+
+
+=head1 DISCLAIMER OF WARRANTY
+
+BECAUSE THIS SOFTWARE IS LICENSED FREE OF CHARGE, THERE IS NO WARRANTY
+FOR THE SOFTWARE, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN
+OTHERWISE STATED IN WRITING THE COPYRIGHT HOLDERS AND/OR OTHER PARTIES
+PROVIDE THE SOFTWARE "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER
+EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE
+ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH
+YOU. SHOULD THE SOFTWARE PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL
+NECESSARY SERVICING, REPAIR, OR CORRECTION.
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
+WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MAY MODIFY AND/OR
+REDISTRIBUTE THE SOFTWARE AS PERMITTED BY THE ABOVE LICENCE, BE
+LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL,
+OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE
+THE SOFTWARE (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING
+RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A
+FAILURE OF THE SOFTWARE TO OPERATE WITH ANY OTHER SOFTWARE), EVEN IF
+SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+=head1 NEGAZIONE DELLA GARANZIA
+
+Poiché questo software viene dato con una licenza gratuita, non
+c'è alcuna garanzia associata ad esso, ai fini e per quanto permesso
+dalle leggi applicabili. A meno di quanto possa essere specificato
+altrove, il proprietario e detentore del copyright fornisce questo
+software "così com'è" senza garanzia di alcun tipo, sia essa espressa
+o implicita, includendo fra l'altro (senza però limitarsi a questo)
+eventuali garanzie implicite di commerciabilità e adeguatezza per
+uno scopo particolare. L'intero rischio riguardo alla qualità ed
+alle prestazioni di questo software rimane a voi. Se il software
+dovesse dimostrarsi difettoso, vi assumete tutte le responsabilità
+ed i costi per tutti i necessari servizi, riparazioni o correzioni.
+
+In nessun caso, a meno che ciò non sia richiesto dalle leggi vigenti
+o sia regolato da un accordo scritto, alcuno dei detentori del diritto
+di copyright, o qualunque altra parte che possa modificare, o redistribuire
+questo software così come consentito dalla licenza di cui sopra, potrà
+essere considerato responsabile nei vostri confronti per danni, ivi
+inclusi danni generali, speciali, incidentali o conseguenziali, derivanti
+dall'utilizzo o dall'incapacità di utilizzo di questo software. Ciò
+include, a puro titolo di esempio e senza limitarsi ad essi, la perdita
+di dati, l'alterazione involontaria o indesiderata di dati, le perdite
+sostenute da voi o da terze parti o un fallimento del software ad
+operare con un qualsivoglia altro software. Tale negazione di garanzia
+rimane in essere anche se i dententori del copyright, o qualsiasi altra
+parte, è stata avvisata della possibilità di tali danneggiamenti.
+
+Se decidete di utilizzare questo software, lo fate a vostro rischio
+e pericolo. Se pensate che i termini di questa negazione di garanzia
+non si confacciano alle vostre esigenze, o al vostro modo di
+considerare un software, o ancora al modo in cui avete sempre trattato
+software di terze parti, non usatelo. Se lo usate, accettate espressamente
+questa negazione di garanzia e la piena responsabilità per qualsiasi
+tipo di danno, di qualsiasi natura, possa derivarne.
+
+=cut
