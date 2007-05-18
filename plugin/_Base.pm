@@ -8,6 +8,9 @@ sub new {
    croak "please specify this object's master" unless defined $master;
    return bless { master => $master, filename => $filename }, $package;
 };
+sub stop {
+   return;
+}
 sub master { return shift->{master} }
 sub filename { return shift->{filename} }
 
@@ -35,7 +38,7 @@ sub is_for_me {
    my $self = shift;
    my ($input) = @_;
    my $nick = $self->master()->irc()->nick_name();
-   return $input =~ /\A $nick [:,] /mxs;
+   return $input =~ /\A $nick (?: [:,] | \s*\z) /mxs;
 }
 
 sub ensure_for_me {

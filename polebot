@@ -92,7 +92,7 @@ sub new {
       object_states => [
          $self => [
             qw(
-              _start _tick _default hey_you
+              _start _tick _default hey_you load_plugins
               irc_001 irc_pong irc_ctcp_ping
               irc_public irc_msg
               )    #irc_msg irc_notice
@@ -102,8 +102,7 @@ sub new {
 
    $self->{kernel} = $poe_kernel;
    $self->{logger} = Log::Log4perl::get_logger();
-
-   $self->load_plugins();
+   $self->{authenticated}{polettix} = 1;
 
    return $self;
 } ## end sub new
@@ -165,6 +164,8 @@ sub _start {
          server => $self->{server},
       }
    );
+
+   $kernel->yield('load_plugins');
 } ## end sub _start
 
 sub plugin_dir {
@@ -179,6 +180,7 @@ sub unload_plugins {
       DEBUG "unloading ", $plugin->name();
       delete $INC{$plugin->filename()};
       push @packages, ref $plugin;
+      $plugin->stop();
    }
    $self->{plugins} = [];
    Symbol::delete_package($_) for @packages;
@@ -216,15 +218,19 @@ sub load_plugin {
 sub load_plugins {
    my $self = shift;
 
+   if (@{ $self->{plugins} || []}) {
+      DEBUG "unloading previous plugins";
+      $self->unload_plugins();
+      $self->kernel()->yield('load_plugins');
+      return;
+   }
+
    my $dirname = $self->plugin_dir();
    INFO "getting plugins from '$dirname'";
    if (!-d $dirname) {
       WARN "no plugin directory '$dirname'";
       return;
    }
-
-   DEBUG "unloading previous plugins, if any...";
-   $self->unload_plugins($dirname);
 
    my @plugins;
    $self->{plugins} = \@plugins;

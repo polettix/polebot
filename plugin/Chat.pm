@@ -3,7 +3,9 @@ use strict;
 use warnings;
 use base 'Polebot::Plugin::Base';
 
-sub only_from_admin { return 1 };
+sub only_from_admin { return 1 }
+
+sub description { return 'facilities for dealing with the IRC' }
 
 sub msg {
    my $self = shift;
@@ -11,13 +13,25 @@ sub msg {
    my ($speaker) = split /!/, $who;
    my $master = $self->master();
 
-   if (my ($channel) = $msg =~ /\bop \s+ (\S+)/mxs) {
+   my ($channel, $what);
+   if (($channel) = $msg =~ /\birc \s+ op \s+ (\S+)/mxs) {
       $master->post_irc(mode => $channel => '+o' => $speaker);
       return 1;
    }
+   elsif (($channel) = $msg =~ /\birc \s+ join \s+ (\S+)/mxs) {
+      $master->post_irc('join' => $channel);
+   }
+   elsif (($channel) = $msg =~ /\birc \s+ part \s+ (\S+)/mxs) {
+      $master->post_irc('part' => $channel);
+   }
+   elsif (($channel, $what) =
+      $msg =~ /\b irc \s+ say \s+ (\S+) \s+ (.*)/mxs)
+   {
+      $master->post_irc(privmsg => $channel => $what);
+   }
 
    return;
-}
+} ## end sub msg
 
 1;
 

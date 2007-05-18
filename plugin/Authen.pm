@@ -8,6 +8,8 @@ use base 'Polebot::Plugin::Base';
 my %password_for = (polettix => 'pippo',);
 my %expected_for;
 
+sub description { return 'authentication support via challenge' }
+
 sub msg {
    my $self = shift;
    my ($who, $where, $msg) = @_;
