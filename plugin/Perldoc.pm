@@ -159,19 +159,20 @@ sub public {
 
    my $channel = $where->[0];
    if (my ($function) = $msg =~ /perldoc\s+-f\s+(\w+)/mxs) {
-      $self->say("prova "
+      $self->say($channel, "prova "
            . "http://perldoc.perl.org/functions/$function.html "
            . "o http://www.perl.it/documenti/perlfunc/view.html?func=$function "
            . "(se esistono!)")
         if exists $perlfunc_valid{$function};
+      return 1;
    } ## end if (my ($function) = $msg...
    elsif (my ($doc) = $msg =~ /perldoc\s+(\w+)/mxs) {
-      $self->say(
-             "prova "
+      $self->say($channel, "prova "
            . "http://perldoc.perl.org/$doc.html "
            . "http://pod2it.sourceforge.net/pods/$doc.html "
-           . "(se esistono!)"
-      ) if exists $perldoc_valid{$doc};
+           . "(se esistono!)")
+        if exists $perldoc_valid{$doc};
+      return 1;
    } ## end elsif (my ($doc) = $msg =~...
    return;
 } ## end sub public
