@@ -33,6 +33,8 @@ sub stop {
    return;
 }
 
+sub can_reload { return 0 }
+
 sub cleanup {
    my $text = shift;
    $text =~ tr[\x00-\x1F\x7F][ ]s;

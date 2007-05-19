@@ -13,6 +13,7 @@ sub stop {
 }
 sub master { return shift->{master} }
 sub filename { return shift->{filename} }
+sub can_reload { return 1 }
 
 sub name {
    my $self = shift;
