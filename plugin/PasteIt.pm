@@ -135,9 +135,9 @@ sub public {
 
       return 1;
    } ## end if (my ($id) = $msg =~...
-   elsif ($msg =~ /\b paste \b/mxs) {
+   elsif ($msg =~ /\A nepaste [:,]? \s*\z/mxs) {
       $self->say($channel,
-         " per fare paste sul canale, puoi trovarmi su $paste_uri");
+         "per fare paste sul canale, puoi trovarmi su $paste_uri");
    }
 
    return;
