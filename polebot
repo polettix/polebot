@@ -9,18 +9,22 @@ use version; my $VERSION = qv('0.0.1');
 use English qw( -no_match_vars );
 use Log::Log4perl qw( :easy );
 use File::Basename qw( basename );
+use File::Spec::Functions qw( catfile );
+use Config::Tiny;
+use FindBin qw( $Bin );
 
-my %config = (
-   nick       => basename($0),
-   password   => '',
-   server     => 'irc.freenode.net',
-   ping_delay => 30,
-   channel    => ['#polebot'],
-   port       => 6667,
-   username   => 'PolettiX bot',
-   ircname    => 'PoCo::IRC PolettiX bot',
-   verbosity  => 'INFO',
+my %default_config = (
+   nick            => basename($0),
+   password        => '',
+   server          => 'irc.freenode.net',
+   ping_delay      => 30,
+   channel         => ['#polebot'],
+   port            => 6667,
+   username        => 'PolettiX bot',
+   ircname         => 'PoCo::IRC PolettiX bot',
+   verbosity       => 'INFO',
 );
+my %config = ( config_file => catfile($Bin, 'config'));
 GetOptions(
    \%config,            'usage',
    'help',              'man',
@@ -29,6 +33,7 @@ GetOptions(
    'channel|c=s@',      'ping_delay|ping-delay|D=i',
    'port|P=i',          'username|u=s',
    'ircname|I=s',       'verbosity|v=s',
+   'config_file|config-file|C=s',
 );
 pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => '')
   if $config{version};
@@ -36,6 +41,27 @@ pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
 pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
   if $config{help};
 pod2usage(-verbose => 2) if $config{man};
+
+my $file_conf = {};
+if (-e $config{config_file}) {
+   $file_conf = Config::Tiny->read($config{config_file})->{_};
+   if (exists $file_conf->{channel}) {
+      $file_conf->{channel} = [ map {
+         s/\A\s+|\s+\z//g;
+         $_;
+      } grep { defined $_ } split /[,\s]+/, $file_conf->{channel} ];
+   }
+}
+
+for my $key (keys %default_config) {
+   next if exists $config{$key}; # set by command line
+   if (exists $file_conf->{$key}) {
+      $config{$key} = $file_conf->{$key};
+   }
+   else {
+      $config{$key} = $default_config{$key};
+   }
+}
 
 for my $channel (@{$config{channel}}) {
    $channel = '#' . $channel unless substr($channel, 0, 1) eq '#';
@@ -100,8 +126,8 @@ sub new {
       ],
    );
 
-   $self->{kernel} = $poe_kernel;
-   $self->{logger} = Log::Log4perl::get_logger();
+   $self->{kernel}                  = $poe_kernel;
+   $self->{logger}                  = Log::Log4perl::get_logger();
    $self->{authenticated}{polettix} = 1;
 
    return $self;
@@ -116,7 +142,6 @@ sub kernel    { return shift->{kernel} }
 sub logger    { return shift->{logger} }
 sub irc       { return shift->{irc} }
 sub connector { return shift->{connector} }
-
 
 sub authenticated {
    my $self = shift;
@@ -175,22 +200,24 @@ sub plugin_dir {
 sub unload_plugins {
    my $self = shift;
 
-   my @packages;
+   my $unload_count = 0;
+   my (@packages, @survivors);
    for my $plugin (@{$self->{plugins} || []}) {
-      DEBUG "unloading ", $plugin->name();
-      delete $INC{$plugin->filename()};
-      push @packages, ref $plugin;
-      $plugin->stop();
-   }
-   $self->{plugins} = [];
+      if ($plugin->can_reload()) {
+         DEBUG "unloading ", $plugin->name();
+         delete $INC{$plugin->filename()};
+         push @packages, ref $plugin;
+         $plugin->stop();
+         ++$unload_count;
+      } ## end if ($plugin->can_reload...
+      else {
+         push @survivors, $plugin;
+      }
+   } ## end for my $plugin (@{$self...
+   $self->{plugins} = \@survivors;
    Symbol::delete_package($_) for @packages;
 
-   my $dirname  = $self->plugin_dir();
-   my @remained =
-     grep { /\A $dirname .* /mxs && !/_Base\.pm \z/mxs } keys %INC;
-   delete @INC{@remained};
-
-   return;
+   return $unload_count;
 } ## end sub unload_plugins
 
 sub load_plugin {
@@ -218,12 +245,13 @@ sub load_plugin {
 sub load_plugins {
    my $self = shift;
 
-   if (@{ $self->{plugins} || []}) {
-      DEBUG "unloading previous plugins";
-      $self->unload_plugins();
-      $self->kernel()->yield('load_plugins');
-      return;
-   }
+   if (@{$self->{plugins} || []}) {
+      DEBUG "trying to unload previous plugins";
+      if ($self->unload_plugins()) {
+         $self->kernel()->yield('load_plugins');
+         return;
+      }
+   } ## end if (@{$self->{plugins}...
 
    my $dirname = $self->plugin_dir();
    INFO "getting plugins from '$dirname'";
@@ -232,7 +260,7 @@ sub load_plugins {
       return;
    }
 
-   my @plugins;
+   my @plugins = @{$self->{plugins} || []};
    $self->{plugins} = \@plugins;
 
    DEBUG "loading plugins...";
@@ -245,8 +273,10 @@ sub load_plugins {
       for my $file (sort readdir $dh) {
          DEBUG "readdir(): got file '$file'";
          next unless $file =~ /\A [^._].*\.pm \z/mxs;
-         $self->load_plugin(catfile($dirname, $file));
-      }
+         my $fullfile = catfile($dirname, $file);
+         next if exists $INC{$fullfile};
+         $self->load_plugin($fullfile);
+      } ## end for my $file (sort readdir...
 
       closedir $dh;
    } ## end if (opendir my $dh, $dirname)
@@ -368,8 +398,8 @@ sub fire_plugins {
    for my $plugin (@{$self->{plugins} || []}) {
       DEBUG "trying '", $plugin->name(), "'...";
 
-      next if $plugin->only_from_operator() && ! ($is_op || $is_adm);
-      next if $plugin->only_from_admin() && ! $is_adm;
+      next if $plugin->only_from_operator() && !($is_op || $is_adm);
+      next if $plugin->only_from_admin() && !$is_adm;
       my $method = $plugin->can($what) or next;
       eval {
          INFO("executed plugin '", $plugin->name(), "'")
