@@ -86,7 +86,6 @@ sub check_news {
          for my $channel (keys %{ $self->{channels} }) {
             $self->say($channel => "$base_uri => $new->{title}");
          }
-         last;
       }
    }
 
