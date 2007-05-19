@@ -402,7 +402,7 @@ sub fire_plugins {
       next if $plugin->only_from_admin() && !$is_adm;
       my $method = $plugin->can($what) or next;
       eval {
-         INFO("executed plugin '", $plugin->name(), "'")
+         DEBUG("executed plugin '", $plugin->name(), "'")
            if $plugin->$method($who, $where, $msg);
       };
       ERROR $EVAL_ERROR if $EVAL_ERROR;
