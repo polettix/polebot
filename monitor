@@ -5,7 +5,7 @@ flagfile="$dirname/relaunch"
 touch "$flagfile"
 while [ -e "$dirname/relaunch" ]; do
    rm -f "$flagfile"
-   "$dirname/polebot" --verbosity DEBUG -n polebot -p asfodelo
+   "$dirname/polebot" --config-file config
    sleep 2
 done
 
