@@ -2,10 +2,10 @@ package Polebot::Plugin::Authen;
 use strict;
 use warnings;
 use Digest::MD5 qw( md5_hex );
+use Config::Tiny;
 
 use base 'Polebot::Plugin::Base';
 
-my %password_for = (polettix => 'pippo',);
 my %expected_for;
 
 sub description { return 'authentication support via challenge' }
@@ -21,8 +21,8 @@ sub msg {
       $master->logout($speaker);
 
       my $challenge = time() . rand();
-      if (exists $password_for{$speaker}) {
-         my $total = "$challenge $password_for{$speaker}\n";
+      if (defined (my $pass = $self->password_for($speaker))) {
+         my $total = "$challenge $pass\n";
          $expected_for{$speaker} = md5_hex($total);
       }
 
@@ -61,5 +61,25 @@ sub msg {
    return;
 } ## end sub msg
 
-1;
+sub password_for {
+   my $self = shift;
+   my ($nick) = @_;
+   
+   $self->load_passwords() unless exists $self->{password_for};
+   return unless exists $self->{password_for}{$nick};
+   return $self->{password_for}{$nick};
+}
 
+sub load_passwords {
+   my $self = shift;
+   if (my $conf = $self->master()->get_plugin_config(ref $self)) {
+      if (-e $conf->{passfile}) {
+         $self->{password_for} = Config::Tiny->read($conf->{passfile})->{_};
+      }
+   }
+   else {
+      $self->{password_for} = {};
+   }
+}
+
+1;

@@ -38,7 +38,7 @@ sub say {
 sub is_for_me {
    my $self = shift;
    my ($input) = @_;
-   my $nick = $self->master()->irc()->nick_name();
+   my $nick = quotemeta $self->master()->irc()->nick_name();
    return $input =~ /\A $nick (?: [:,] | \s*\z) /mxs;
 }
 

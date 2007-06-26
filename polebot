@@ -9,7 +9,7 @@ use version; my $VERSION = qv('0.0.1');
 use English qw( -no_match_vars );
 use Log::Log4perl qw( :easy );
 use File::Basename qw( basename );
-use File::Spec::Functions qw( catfile );
+use File::Spec::Functions qw( catfile rel2abs );
 use Config::Tiny;
 use FindBin qw( $Bin );
 
@@ -44,23 +44,28 @@ pod2usage(-verbose => 2) if $config{man};
 
 my $file_conf = {};
 if (-e $config{config_file}) {
-   $file_conf = Config::Tiny->read($config{config_file})->{_};
-   if (exists $file_conf->{channel}) {
-      $file_conf->{channel} = [ map {
+   $config{file} = rel2abs($config{file});
+   $file_conf = Config::Tiny->read($config{config_file});
+   if (exists $file_conf->{_}{channel}) {
+      $file_conf->{_}{channel} = [ map {
          s/\A\s+|\s+\z//g;
          $_;
-      } grep { defined $_ } split /[,\s]+/, $file_conf->{channel} ];
+      } grep { defined $_ } split /[,\s]+/, $file_conf->{_}{channel} ];
    }
 }
 
 for my $key (keys %default_config) {
    next if exists $config{$key}; # set by command line
-   if (exists $file_conf->{$key}) {
-      $config{$key} = $file_conf->{$key};
+   if (exists $file_conf->{_}{$key}) {
+      $config{$key} = $file_conf->{_}{$key};
    }
    else {
       $config{$key} = $default_config{$key};
    }
+}
+for my $groupname (keys %$file_conf) {
+   next unless substr($groupname, 0, 8) eq 'Plugin::';
+   $config{PluginConf}{'Polebot::' . $groupname} = $file_conf->{$groupname};
 }
 
 for my $channel (@{$config{channel}}) {
@@ -121,6 +126,7 @@ sub new {
               _start _tick _default hey_you load_plugins
               irc_001 irc_pong irc_ctcp_ping
               irc_public irc_msg
+              irc_quit irc_nick irc_kick irc_part
               )    #irc_msg irc_notice
          ],
       ],
@@ -142,6 +148,14 @@ sub kernel    { return shift->{kernel} }
 sub logger    { return shift->{logger} }
 sub irc       { return shift->{irc} }
 sub connector { return shift->{connector} }
+sub config_file { return shift->{config_file} }
+
+sub get_plugin_config {
+   my $self = shift;
+   my ($plugin_name) = @_;
+   return unless exists $self->{PluginConf}{$plugin_name};
+   return $self->{PluginConf}{$plugin_name};
+}
 
 sub authenticated {
    my $self = shift;
@@ -162,6 +176,42 @@ sub logout {
    my ($self, $nick) = @_;
    delete $self->{authenticated}{$nick};
 }
+
+sub consider_implicit_logout {
+   my ($self, $nick) = @_;
+   $self->logout($nick) unless $self->irc()->nick_info($nick);
+   return;
+}
+
+sub irc_quit {
+   my ($self, $who) = @_[OBJECT, ARG0];
+   my ($nick) = split /!/, $who;
+   $self->logout($nick);
+   return;
+}
+
+sub irc_nick {
+   my ($self, $who, $newnick) = @_[OBJECT, ARG0, ARG1];
+   my ($nick) = split /!/, $who;
+   $self->login($newnick) if $self->is_authenticated($nick);
+   $self->logout($nick);
+   return;
+}
+
+sub irc_kick {
+   my ($self, $who) = @_[OBJECT, ARG0];
+   my ($nick) = split /!/, $who;
+   $self->consider_implicit_logout($nick);
+   return;
+}
+
+sub irc_part {
+   my ($self, $who) = @_[OBJECT, ARG0];
+   my ($nick) = split /!/, $who;
+   $self->consider_implicit_logout($nick);
+   return;
+}
+
 
 # The bot session has started.  Register this bot with the "magnet"
 # IRC component.  Select a nickname.  Connect to a server.
@@ -329,9 +379,13 @@ sub say {
    my $self   = shift;
    my $dest   = shift;
    my $kernel = $self->{kernel};
+   my $method = 'privmsg';
+   if ($dest =~ /\A (.*) ! (.*) \z/mxs) {
+      ($method, $dest) = ($1, $2);
+   }
    for (map { split /\n+/ } @_) {
       my $line = defined($_) ? $_ : '';
-      $self->post_irc(privmsg => $dest => $line);
+      $self->post_irc($method => $dest => $line);
    }
 } ## end sub say
 
@@ -445,11 +499,6 @@ sub irc_msg {
    return;
 } ## end sub irc_msg
 
-#sub irc_msg {
-#   my $self = shift;
-#   return $self->got_something(@_, 'msg');
-#}
-#
 #sub irc_notice {
 #   my $self = shift;
 #   return $self->got_something(@_, 'notice');
@@ -460,6 +509,7 @@ sub irc_pong { DEBUG 'pong...' }
 sub irc_ctcp_ping {
    my $self = $_[OBJECT];
 }
+
 
 package POE::Component::IRC::Plugin::Connector::Custom;
 
@@ -633,7 +683,7 @@ Flavio Poletti C<flavio@polettix.it>
 
 =head1 LICENCE AND COPYRIGHT
 
-Copyright (c) 2006, Flavio Poletti C<flavio@polettix.it>. All rights reserved.
+Copyright (c) 2007, Flavio Poletti C<flavio@polettix.it>. All rights reserved.
 
 This script is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself. See L<perlartistic>
