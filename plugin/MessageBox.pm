@@ -42,15 +42,15 @@ sub _execute {
    }
 
    return 1;
-} ## end sub msg
+} ## end sub _execute
 
 sub msg {
    my $self = shift;
    my ($who, $where, $msg) = @_;
    my ($speaker) = split /!/, $who;
    $self->fire_notification($speaker, $speaker);
-   return $self->_execute($who, [ $speaker ], $msg);
-}
+   return $self->_execute($who, [$speaker], $msg);
+} ## end sub msg
 
 sub public {
    my $self = shift;
@@ -63,7 +63,7 @@ sub public {
    return unless $self->is_for_me($msg);
    my $nick = quotemeta $self->master()->irc()->nick_name();
    $msg =~ s/\A $nick [:,] \s*//mxsg;
-   return $self->_execute($who, [ $target ], $msg);
+   return $self->_execute($who, [$target], $msg);
 } ## end sub public
 
 sub fire_notification {
@@ -76,7 +76,7 @@ sub fire_notification {
       $self->flag_notification($speaker);
    }
    return;
-}
+} ## end sub fire_notification
 
 sub has_messages {
    my $self = shift;
@@ -121,13 +121,13 @@ sub clear_notification {
    my ($who) = @_;
    delete $self->{flag}{$who};
    return;
-} ## end sub flag_notification
+} ## end sub clear_notification
 
 sub notify_sent {
    my $self = shift;
    my ($who) = @_;
    $self->master()->logger()->debug("last: $self->{flag}{$who}");
    return $self->{flag}{$who} && ($self->{flag}{$who} + 3600 > time());
-}
+} ## end sub notify_sent
 
 1;
