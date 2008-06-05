@@ -1,4 +1,4 @@
-package Polebot::Plugin::Help; # FIXME
+package Polebot::Plugin::Help;
 use strict;
 use warnings;
 use Readonly;
