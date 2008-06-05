@@ -4,7 +4,8 @@ use warnings;
 use Readonly;
 use base 'Polebot::Plugin::Base';
 
-Readonly my $uri => 'http://www.polettix.it/cgi-bin/wiki.pl/Programming/nepaste';
+Readonly my $uri =>
+  'http://www.polettix.it/cgi-bin/wiki.pl/Programming/nepaste';
 
 sub description { 'provide generic help about the bot' }
 
@@ -20,7 +21,7 @@ sub public {
    }
 
    return 1;
-}
+} ## end sub public
 
 1;
 
