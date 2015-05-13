@@ -14,7 +14,7 @@ sub public {
    my $channel = $where->[0];
 
    my $logline;
-   (my ($action) = $msg =~ /\A \x{01} ACTION \s+ (.*) \x{01} \z/mxs;
+   my ($action) = $msg =~ /\A \x{01} ACTION \s+ (.*) \x{01} \z/mxs;
    if ($action) {
       $msg = "$speaker $action";
       $logline = "*\t$msg";

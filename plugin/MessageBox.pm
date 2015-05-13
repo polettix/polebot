@@ -63,7 +63,7 @@ sub public {
    return unless $self->is_for_me($msg);
    my $nick = quotemeta $self->master()->irc()->nick_name();
    $msg =~ s/\A $nick [:,] \s*//mxsg;
-   return $self->_execute($who, [$target], $msg);
+   return $self->_execute($who, [$speaker], $msg);
 } ## end sub public
 
 sub fire_notification {
